@@ -103,9 +103,9 @@ func (env *Environment) DescribeCluster(ctx context.Context, id cycle.ClusterID)
 		switch aws.StringValue(instance.LifecycleState) {
 		case "Pending", "Pending:Wait", "Pending:Proceed":
 			state = cycle.Starting
-		case "InService":
+		case "InService", "Terminating", "Terminating:Wait":
 			state = cycle.Started
-		case "Terminating", "Terminating:Wait", "Terminating:Proceed":
+		case "Terminating:Proceed":
 			state = cycle.Terminating
 		default: // "Terminated", "Standby", ...
 			continue
@@ -196,6 +196,19 @@ func (env *Environment) DescribeCluster(ctx context.Context, id cycle.ClusterID)
 		instanceMap[id] = instance
 	}
 
+	for id, instance := range instanceMap {
+		for _, containerInstance := range containerInstances {
+			if aws.StringValue(containerInstance.Ec2InstanceId) == string(id) {
+				id = ""
+				break
+			}
+		}
+		if len(id) != 0 {
+			instance.State = cycle.Drained
+			instanceMap[id] = instance
+		}
+	}
+
 	if len(ec2InstancesNeedTag) != 0 {
 		env.createCycleInstanceUpdatedAtTag(ctx, time.Now(), ec2InstancesNeedTag...)
 	}
@@ -225,44 +238,7 @@ func (env *Environment) StartInstances(ctx context.Context, cluster cycle.Cluste
 	if err != nil {
 		return errors.WithStack(err)
 	}
-
-	timeout := time.NewTimer(2 * time.Minute)
-	defer timeout.Stop()
-
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-		case <-timeout.C:
-			return errors.New("the new instances took more than 2 minutes to come up")
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-
-		newGroup, err := env.describeAutoScalingGroup(ctx, groupName)
-		if err != nil {
-			return err
-		}
-
-		newInstanceCount := 0
-	searchNewInstances:
-		for _, newInstance := range newGroup.Instances {
-			for _, oldInstance := range group.Instances {
-				newID := aws.StringValue(newInstance.InstanceId)
-				oldID := aws.StringValue(oldInstance.InstanceId)
-				if newID == oldID {
-					continue searchNewInstances
-				}
-			}
-			newInstanceCount++
-		}
-
-		if newInstanceCount >= count {
-			return nil
-		}
-	}
+	return nil
 }
 
 func (env *Environment) DrainInstance(ctx context.Context, instance cycle.InstanceID) error {
@@ -307,7 +283,6 @@ func (env *Environment) TerminateInstance(ctx context.Context, instance cycle.In
 			return errors.WithStack(err)
 		}
 	}
-
 	_, err = env.asg.CompleteLifecycleActionWithContext(ctx, &autoscaling.CompleteLifecycleActionInput{
 		AutoScalingGroupName:  aws.String(cachedInstance.ec2GroupName),
 		InstanceId:            aws.String(cachedInstance.ec2InstanceId),

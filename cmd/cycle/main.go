@@ -82,37 +82,36 @@ func run(ctx context.Context, config config) error {
 
 	targetSize := config.TargetSize
 	for {
-		cluster, err := environment.DescribeCluster(ctx, clusterID)
-		if err != nil {
-			return err
-		}
+		if cluster, err := environment.DescribeCluster(ctx, clusterID); err != nil {
+			events.Log("error describing %{cluster_id}s - %{error}v", clusterID, err)
+		} else {
+			if targetSize == 0 {
+				targetSize = len(cluster.Instances)
+			}
 
-		if targetSize == 0 {
-			targetSize = len(cluster.Instances)
-		}
+			taskConfig := cycle.TaskConfig{
+				TargetSize:   targetSize,
+				MinSize:      coalesce(config.MinSize, max(cluster.MinSize, fraction(targetSize, 0.8))),
+				MaxSize:      coalesce(config.MaxSize, min(cluster.MaxSize, fraction(targetSize, 1.2))),
+				DrainTimeout: config.DrainTimeout,
+			}
 
-		taskConfig := cycle.TaskConfig{
-			TargetSize:   targetSize,
-			MinSize:      coalesce(config.MinSize, max(cluster.MinSize, fraction(targetSize, 0.8))),
-			MaxSize:      coalesce(config.MaxSize, min(cluster.MaxSize, fraction(targetSize, 1.2))),
-			DrainTimeout: config.DrainTimeout,
-		}
+			events.Log("%{cluster_id}s - generating tasks (target size: %{target_size}d, min size: %{min_size}d, max size: %{max_size}d, drain timeout: %{drain_timeout}s)",
+				cluster.ID, taskConfig.TargetSize, taskConfig.MinSize, taskConfig.MaxSize, taskConfig.DrainTimeout)
 
-		events.Log("%{cluster_id}s - generating tasks (target size: %{target_size}d, min size: %{min_size}d, max size: %{max_size}d, drain timeout: %{drain_timeout}s)",
-			cluster.ID, taskConfig.TargetSize, taskConfig.MinSize, taskConfig.MaxSize, taskConfig.DrainTimeout)
+			tasks, err := cycle.Tasks(cluster, taskConfig)
+			if err != nil {
+				return err
+			}
 
-		tasks, err := cycle.Tasks(cluster, taskConfig)
-		if err != nil {
-			return err
-		}
+			if len(tasks) == 0 {
+				events.Log("done")
+				return nil
+			}
 
-		if len(tasks) == 0 {
-			events.Log("done")
-			return nil
-		}
-
-		if err = cycle.Run(ctx, environment, tasks...); err != nil {
-			events.Log("%{error}+v", err)
+			if err = cycle.Run(ctx, environment, tasks...); err != nil {
+				events.Log("%{error}+v", err)
+			}
 		}
 
 		if config.DryRun {
