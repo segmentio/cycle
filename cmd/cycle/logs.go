@@ -46,34 +46,40 @@ func (env envLogs) StartInstances(ctx context.Context, cluster cycle.ClusterID, 
 	events.Debug("%{cluster_id}s - starting %{instance_count}d new instances", cluster, count)
 	err := env.base.StartInstances(ctx, cluster, count)
 	if err != nil {
-		events.Log("%{cluster_id}s - error starting %{instance_count}d instances - %{error}v", cluster, count, err)
+		events.Log("error starting instances - %{error}v", err)
 	}
 	return err
 }
 
-func (env envLogs) DrainInstance(ctx context.Context, instance cycle.InstanceID) error {
-	events.Debug("%{instance_id}s - draining", instance)
-	err := env.base.DrainInstance(ctx, instance)
+func (env envLogs) DrainInstances(ctx context.Context, instances ...cycle.InstanceID) error {
+	for _, instance := range instances {
+		events.Debug("%{instance_id}s - draining", instance)
+	}
+	err := env.base.DrainInstances(ctx, instances...)
 	if err != nil {
-		events.Log("%{instance_id}s - error draining - %{error}v", instance, err)
+		events.Log("error draining instances - %{error}v", err)
 	}
 	return err
 }
 
-func (env envLogs) TerminateInstance(ctx context.Context, instance cycle.InstanceID) error {
-	events.Debug("%{instance_id}s - terminating", instance)
-	err := env.base.TerminateInstance(ctx, instance)
+func (env envLogs) TerminateInstances(ctx context.Context, instances ...cycle.InstanceID) error {
+	for _, instance := range instances {
+		events.Debug("%{instance_id}s - terminating", instance)
+	}
+	err := env.base.TerminateInstances(ctx, instances...)
 	if err != nil {
-		events.Log("%{instance_id}s - error terminating - %{error}v", instance, err)
+		events.Log("error terminating instances - %{error}v", err)
 	}
 	return nil
 }
 
-func (env envLogs) WaitInstanceState(ctx context.Context, instance cycle.InstanceID, state cycle.InstanceState) error {
-	events.Debug("%{instance_id}s - waiting to be %{waiting_state}s", instance, state)
-	err := env.base.WaitInstanceState(ctx, instance, state)
+func (env envLogs) WaitInstances(ctx context.Context, state cycle.InstanceState, instances ...cycle.InstanceID) error {
+	for _, instance := range instances {
+		events.Debug("%{instance_id}s - waiting to be %{waiting_state}s", instance, state)
+	}
+	err := env.base.WaitInstances(ctx, state, instances...)
 	if err != nil {
-		events.Log("%{instance_id}s - error waiting to be %{waiting_state}s - %{error}v", instance, state, err)
+		events.Log("error waiting for instance to be %{waiting_state}s - %{error}v", state, err)
 	}
 	return err
 }

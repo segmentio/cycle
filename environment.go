@@ -25,16 +25,16 @@ type Environment interface {
 	// instances.
 	StartInstances(context.Context, ClusterID, int) error
 
-	// DrainInstance puts the instance identified by the given ID in draining
+	// DrainInstances puts the instances identified by the given IDs in draining
 	// state.
-	DrainInstance(context.Context, InstanceID) error
+	DrainInstances(context.Context, ...InstanceID) error
 
-	// TerminateInstance terminates the instance identified by the given ID.
-	TerminateInstance(context.Context, InstanceID) error
+	// TerminateInstances terminates the instance identified by the given IDs.
+	TerminateInstances(context.Context, ...InstanceID) error
 
-	// WaitInstanceState is called when the cluster cycling algorithm is waiting
-	// for a given instance to enter a specific state.
-	WaitInstanceState(context.Context, InstanceID, InstanceState) error
+	// WaitInstances is called when the cluster cycling algorithm is waiting
+	// for a given instances to enter a specific state.
+	WaitInstances(context.Context, InstanceState, ...InstanceID) error
 }
 
 // ConfigID is a type representing a cluster configuration ID.
@@ -102,15 +102,15 @@ func (dryRun) StartInstances(ctx context.Context, cluster ClusterID, count int) 
 	return ctx.Err()
 }
 
-func (dryRun) DrainInstance(ctx context.Context, instance InstanceID) error {
+func (dryRun) DrainInstances(ctx context.Context, instances ...InstanceID) error {
 	return ctx.Err()
 }
 
-func (dryRun) TerminateInstance(ctx context.Context, instance InstanceID) error {
+func (dryRun) TerminateInstances(ctx context.Context, instances ...InstanceID) error {
 	return ctx.Err()
 }
 
-func (dryRun) WaitInstanceState(ctx context.Context, instance InstanceID, state InstanceState) error {
+func (dryRun) WaitInstances(ctx context.Context, state InstanceState, instances ...InstanceID) error {
 	return ctx.Err()
 }
 

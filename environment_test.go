@@ -73,68 +73,74 @@ func (env *TestEnvironment) StartInstances(ctx context.Context, cluster cycle.Cl
 	return nil
 }
 
-func (env *TestEnvironment) DrainInstance(ctx context.Context, instance cycle.InstanceID) error {
+func (env *TestEnvironment) DrainInstances(ctx context.Context, instances ...cycle.InstanceID) error {
 	env.mutex.Lock()
 	defer env.mutex.Unlock()
 
-	c, i, err := env.instanceByID(ctx, instance)
-	if err != nil {
-		if errors.Is("NotFound", err) {
-			return nil
+	for _, instance := range instances {
+		c, i, err := env.instanceByID(ctx, instance)
+		if err != nil {
+			if errors.Is("NotFound", err) {
+				continue
+			}
+			return err
 		}
-		return err
+		c.Instances[i].State = cycle.Draining
+		c.Instances[i].UpdatedAt = time.Now()
 	}
 
-	c.Instances[i].State = cycle.Draining
-	c.Instances[i].UpdatedAt = time.Now()
 	return nil
 }
 
-func (env *TestEnvironment) TerminateInstance(ctx context.Context, instance cycle.InstanceID) error {
+func (env *TestEnvironment) TerminateInstances(ctx context.Context, instances ...cycle.InstanceID) error {
 	env.mutex.Lock()
 	defer env.mutex.Unlock()
 
-	c, i, err := env.instanceByID(ctx, instance)
-	if err != nil {
-		if errors.Is("NotFound", err) {
-			return nil
+	for _, instance := range instances {
+		c, i, err := env.instanceByID(ctx, instance)
+		if err != nil {
+			if errors.Is("NotFound", err) {
+				continue
+			}
+			return err
 		}
-		return err
+		c.Instances[i].State = cycle.Terminating
+		c.Instances[i].UpdatedAt = time.Now()
 	}
 
-	c.Instances[i].State = cycle.Terminating
-	c.Instances[i].UpdatedAt = time.Now()
 	return nil
 }
 
-func (env *TestEnvironment) WaitInstanceState(ctx context.Context, instance cycle.InstanceID, state cycle.InstanceState) error {
+func (env *TestEnvironment) WaitInstances(ctx context.Context, state cycle.InstanceState, instances ...cycle.InstanceID) error {
 	env.mutex.Lock()
 	defer env.mutex.Unlock()
 
-	c, i, err := env.instanceByID(ctx, instance)
-	if err != nil {
-		if errors.Is("NotFound", err) {
-			return nil
-		}
-		return err
-	}
-
-	switch state {
-	case cycle.Started:
-		if c.Instances[i].State == cycle.Starting {
-			c.Instances[i].State = cycle.Started
-			c.Instances[i].UpdatedAt = time.Now()
+	for _, instance := range instances {
+		c, i, err := env.instanceByID(ctx, instance)
+		if err != nil {
+			if errors.Is("NotFound", err) {
+				continue
+			}
+			return err
 		}
 
-	case cycle.Drained:
-		if c.Instances[i].State == cycle.Draining {
-			c.Instances[i].State = cycle.Drained
-			c.Instances[i].UpdatedAt = time.Now()
-		}
+		switch state {
+		case cycle.Started:
+			if c.Instances[i].State == cycle.Starting {
+				c.Instances[i].State = cycle.Started
+				c.Instances[i].UpdatedAt = time.Now()
+			}
 
-	case cycle.Terminated:
-		if c.Instances[i].State == cycle.Terminating {
-			c.Instances = filterInstances(c.Instances, func(j int) bool { return i != j })
+		case cycle.Drained:
+			if c.Instances[i].State == cycle.Draining {
+				c.Instances[i].State = cycle.Drained
+				c.Instances[i].UpdatedAt = time.Now()
+			}
+
+		case cycle.Terminated:
+			if c.Instances[i].State == cycle.Terminating {
+				c.Instances = filterInstances(c.Instances, func(j int) bool { return i != j })
+			}
 		}
 	}
 
@@ -240,29 +246,41 @@ func (env testLogger) StartInstances(ctx context.Context, cluster cycle.ClusterI
 	return err
 }
 
-func (env testLogger) DrainInstance(ctx context.Context, instance cycle.InstanceID) error {
-	env.Logf("%s - draining", instance)
-	err := env.base.DrainInstance(ctx, instance)
+func (env testLogger) DrainInstances(ctx context.Context, instances ...cycle.InstanceID) error {
+	for _, instance := range instances {
+		env.Logf("%s - draining", instance)
+	}
+	err := env.base.DrainInstances(ctx, instances...)
 	if err != nil {
-		env.Logf("%s - error draining - %v", instance, err)
+		for _, instance := range instances {
+			env.Logf("%s - error draining - %v", instance, err)
+		}
 	}
 	return err
 }
 
-func (env testLogger) TerminateInstance(ctx context.Context, instance cycle.InstanceID) error {
-	env.Logf("%s - terminating", instance)
-	err := env.base.TerminateInstance(ctx, instance)
+func (env testLogger) TerminateInstances(ctx context.Context, instances ...cycle.InstanceID) error {
+	for _, instance := range instances {
+		env.Logf("%s - terminating", instance)
+	}
+	err := env.base.TerminateInstances(ctx, instances...)
 	if err != nil {
-		env.Logf("%s - error terminating - %v", instance, err)
+		for _, instance := range instances {
+			env.Logf("%s - error terminating - %v", instance, err)
+		}
 	}
 	return nil
 }
 
-func (env testLogger) WaitInstanceState(ctx context.Context, instance cycle.InstanceID, state cycle.InstanceState) error {
-	env.Logf("%s - waiting to be %s", instance, state)
-	err := env.base.WaitInstanceState(ctx, instance, state)
+func (env testLogger) WaitInstances(ctx context.Context, state cycle.InstanceState, instances ...cycle.InstanceID) error {
+	for _, instance := range instances {
+		env.Logf("%s - waiting to be %s", instance, state)
+	}
+	err := env.base.WaitInstances(ctx, state, instances...)
 	if err != nil {
-		env.Logf("%s - error waiting to be %s - %v", instance, state, err)
+		for _, instance := range instances {
+			env.Logf("%s - error waiting to be %s - %v", instance, state, err)
+		}
 	}
 	return err
 }

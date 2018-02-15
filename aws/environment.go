@@ -61,12 +61,12 @@ func (env *Environment) DescribeCluster(ctx context.Context, id cycle.ClusterID)
 
 	group, err := env.describeAutoScalingGroup(ctx, groupName)
 	if err != nil {
-		return cycle.Cluster{}, err
+		return cycle.Cluster{}, errors.WithMessage(err, "describing autoscaling group")
 	}
 
 	hooks, err := env.describeLifecycleHooks(ctx, groupName)
 	if err != nil {
-		return cycle.Cluster{}, err
+		return cycle.Cluster{}, errors.WithMessage(err, "describing lifecycle hooks")
 	}
 	termHook := ""
 	for _, hook := range hooks {
@@ -129,7 +129,7 @@ func (env *Environment) DescribeCluster(ctx context.Context, id cycle.ClusterID)
 	ec2Instances, err := env.describeInstances(ctx, instanceIds)
 	ec2InstancesNeedTag := []*string{}
 	if err != nil {
-		return cycle.Cluster{}, err
+		return cycle.Cluster{}, errors.WithMessage(err, "describing instances")
 	}
 	for _, ec2Instance := range ec2Instances {
 		id := aws.StringValue(ec2Instance.InstanceId)
@@ -168,7 +168,7 @@ func (env *Environment) DescribeCluster(ctx context.Context, id cycle.ClusterID)
 
 	containerInstances, err := env.describeContainerInstances(ctx, clusterName)
 	if err != nil {
-		return cycle.Cluster{}, err
+		return cycle.Cluster{}, errors.WithMessage(err, "describing container instances")
 	}
 	for _, containerInstance := range containerInstances {
 		id := aws.StringValue(containerInstance.Ec2InstanceId)
@@ -177,14 +177,16 @@ func (env *Environment) DescribeCluster(ctx context.Context, id cycle.ClusterID)
 			continue
 		}
 
-		if aws.StringValue(containerInstance.Status) == "DRAINING" {
-			taskCount := 0 +
-				aws.Int64Value(containerInstance.RunningTasksCount) +
-				aws.Int64Value(containerInstance.PendingTasksCount)
-			if taskCount == 0 {
-				instance.State = cycle.Drained
-			} else {
-				instance.State = cycle.Draining
+		if instance.State == cycle.Started {
+			if aws.StringValue(containerInstance.Status) == "DRAINING" {
+				taskCount := 0 +
+					aws.Int64Value(containerInstance.RunningTasksCount) +
+					aws.Int64Value(containerInstance.PendingTasksCount)
+				if taskCount == 0 {
+					instance.State = cycle.Drained
+				} else {
+					instance.State = cycle.Draining
+				}
 			}
 		}
 
@@ -196,6 +198,8 @@ func (env *Environment) DescribeCluster(ctx context.Context, id cycle.ClusterID)
 		instanceMap[id] = instance
 	}
 
+	// All instances that aren't registered to ECS are assumed to be drained
+	// already.
 	for id, instance := range instanceMap {
 		for _, containerInstance := range containerInstances {
 			if aws.StringValue(containerInstance.Ec2InstanceId) == string(id) {
@@ -241,61 +245,117 @@ func (env *Environment) StartInstances(ctx context.Context, cluster cycle.Cluste
 	return nil
 }
 
-func (env *Environment) DrainInstance(ctx context.Context, instance cycle.InstanceID) error {
-	env.mutex.RLock()
-	cachedInstance, ok := env.cache[instance]
-	env.mutex.RUnlock()
-	if !ok {
-		return errors.WithTypes(errors.Errorf("no instance with id %s was found", instance), "NotFound")
-	}
+func (env *Environment) DrainInstances(ctx context.Context, instances ...cycle.InstanceID) error {
+	var ecsInstances = map[string][]*string{}
+	var ec2Instances []*string
 
-	_, err := env.ecs.UpdateContainerInstancesStateWithContext(ctx, &ecs.UpdateContainerInstancesStateInput{
-		ContainerInstances: []*string{aws.String(cachedInstance.ecsInstanceArn)},
-		Cluster:            aws.String(cachedInstance.ecsCluster),
-		Status:             aws.String("DRAINING"),
-	})
-	if err != nil {
-		return errors.WithStack(err)
-	}
-
-	return env.createCycleInstanceUpdatedAtTag(ctx, time.Now(), aws.String(string(instance)))
-}
-
-func (env *Environment) TerminateInstance(ctx context.Context, instance cycle.InstanceID) error {
-	env.mutex.RLock()
-	cachedInstance, ok := env.cache[instance]
-	env.mutex.RUnlock()
-	if !ok {
-		return errors.WithTypes(errors.Errorf("no instance with id %s was found", instance), "NotFound")
-	}
-
-	_, err := env.asg.TerminateInstanceInAutoScalingGroupWithContext(ctx, &autoscaling.TerminateInstanceInAutoScalingGroupInput{
-		InstanceId:                     aws.String(string(instance)),
-		ShouldDecrementDesiredCapacity: aws.Bool(true),
-	})
-	if err != nil {
-		// Retry without decrementing the count in case we're going under the min.
-		_, err := env.asg.TerminateInstanceInAutoScalingGroupWithContext(ctx, &autoscaling.TerminateInstanceInAutoScalingGroupInput{
-			InstanceId:                     aws.String(string(instance)),
-			ShouldDecrementDesiredCapacity: aws.Bool(false),
-		})
-		if err != nil {
-			return errors.WithStack(err)
+	for _, instance := range instances {
+		env.mutex.RLock()
+		cachedInstance, ok := env.cache[instance]
+		env.mutex.RUnlock()
+		if ok {
+			ecsInstances[cachedInstance.ecsCluster] = append(
+				ecsInstances[cachedInstance.ecsCluster],
+				aws.String(cachedInstance.ecsInstanceArn),
+			)
+			ec2Instances = append(ec2Instances, aws.String(cachedInstance.ec2InstanceId))
 		}
 	}
-	_, err = env.asg.CompleteLifecycleActionWithContext(ctx, &autoscaling.CompleteLifecycleActionInput{
-		AutoScalingGroupName:  aws.String(cachedInstance.ec2GroupName),
-		InstanceId:            aws.String(cachedInstance.ec2InstanceId),
-		LifecycleHookName:     aws.String(cachedInstance.ec2TermHook),
-		LifecycleActionResult: aws.String("CONTINUE"),
-	})
-	if err != nil {
-		return errors.WithStack(err)
+
+	var errch = make(chan error)
+	var wg sync.WaitGroup
+
+	for cluster, containerInstances := range ecsInstances {
+		const containerInstancesLimit = 10
+
+		for len(containerInstances) != 0 {
+			n := len(containerInstances)
+			if n > containerInstancesLimit {
+				n = containerInstancesLimit
+			}
+
+			wg.Add(1)
+			go func(cluster string, containerInstances []*string) {
+				defer wg.Done()
+				_, err := env.ecs.UpdateContainerInstancesStateWithContext(ctx, &ecs.UpdateContainerInstancesStateInput{
+					ContainerInstances: containerInstances,
+					Cluster:            aws.String(cluster),
+					Status:             aws.String("DRAINING"),
+				})
+				if err != nil {
+					errch <- errors.WithStack(err)
+				}
+			}(cluster, containerInstances[:n])
+
+			containerInstances = containerInstances[n:]
+		}
 	}
-	return nil
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		errch <- env.createCycleInstanceUpdatedAtTag(ctx, time.Now(), ec2Instances...)
+	}()
+
+	go func() {
+		wg.Wait()
+		close(errch)
+	}()
+
+	return errors.Recv(errch)
 }
 
-func (env *Environment) WaitInstanceState(ctx context.Context, instance cycle.InstanceID, state cycle.InstanceState) error {
+func (env *Environment) TerminateInstances(ctx context.Context, instances ...cycle.InstanceID) error {
+	var errch = make(chan error)
+	var wg sync.WaitGroup
+
+	for _, instance := range instances {
+		env.mutex.RLock()
+		cachedInstance, ok := env.cache[instance]
+		env.mutex.RUnlock()
+		if !ok {
+			continue
+		}
+
+		wg.Add(1)
+		go func(instance cycle.InstanceID) {
+			defer wg.Done()
+			_, err := env.asg.TerminateInstanceInAutoScalingGroupWithContext(ctx, &autoscaling.TerminateInstanceInAutoScalingGroupInput{
+				InstanceId:                     aws.String(string(instance)),
+				ShouldDecrementDesiredCapacity: aws.Bool(true),
+			})
+			if err != nil {
+				// Retry without decrementing the count in case we're going under the min.
+				_, err := env.asg.TerminateInstanceInAutoScalingGroupWithContext(ctx, &autoscaling.TerminateInstanceInAutoScalingGroupInput{
+					InstanceId:                     aws.String(string(instance)),
+					ShouldDecrementDesiredCapacity: aws.Bool(false),
+				})
+				if err != nil {
+					errch <- errors.WithStack(err)
+					return
+				}
+			}
+			_, err = env.asg.CompleteLifecycleActionWithContext(ctx, &autoscaling.CompleteLifecycleActionInput{
+				AutoScalingGroupName:  aws.String(cachedInstance.ec2GroupName),
+				InstanceId:            aws.String(cachedInstance.ec2InstanceId),
+				LifecycleHookName:     aws.String(cachedInstance.ec2TermHook),
+				LifecycleActionResult: aws.String("CONTINUE"),
+			})
+			if err != nil {
+				errch <- errors.WithStack(err)
+			}
+		}(instance)
+	}
+
+	go func() {
+		wg.Wait()
+		close(errch)
+	}()
+
+	return errors.Recv(errch)
+}
+
+func (env *Environment) WaitInstances(ctx context.Context, state cycle.InstanceState, instances ...cycle.InstanceID) error {
 	return ctx.Err()
 }
 
@@ -321,6 +381,9 @@ func (env *Environment) describeAutoScalingGroup(ctx context.Context, name strin
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
+	if len(out.AutoScalingGroups) == 0 {
+		return nil, errors.WithTypes(errors.New("no such autoscaling group"), "NotFound")
+	}
 	return out.AutoScalingGroups[0], nil
 }
 
@@ -335,6 +398,9 @@ func (env *Environment) describeLifecycleHooks(ctx context.Context, name string)
 }
 
 func (env *Environment) describeInstances(ctx context.Context, instanceIds []*string) ([]*ec2.Instance, error) {
+	if len(instanceIds) == 0 {
+		return nil, nil
+	}
 	var instances = make([]*ec2.Instance, 0, len(instanceIds))
 	var nextToken *string
 	for {

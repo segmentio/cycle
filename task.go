@@ -58,27 +58,30 @@ func Tasks(cluster Cluster, config TaskConfig) ([]Task, error) {
 	var tasks []Task
 	var started int
 	var outdated int
+	var toDrain []InstanceID
+	var toTerm []InstanceID
+	var toWait = map[InstanceState][]InstanceID{}
 
 	for _, instance := range cluster.Instances {
 		switch instance.State {
 		case Starting:
-			tasks = append(tasks, wait(instance.ID, Started))
+			toWait[Started] = append(toWait[Started], instance.ID)
 
 		case Started:
 			started++
 
 		case Draining:
 			if !instance.UpdatedAt.IsZero() && config.DrainTimeout != 0 && now.Sub(instance.UpdatedAt) >= config.DrainTimeout {
-				tasks = append(tasks, terminate(instance.ID))
+				toTerm = append(toTerm, instance.ID)
 			} else {
-				tasks = append(tasks, wait(instance.ID, Drained))
+				toWait[Drained] = append(toWait[Drained], instance.ID)
 			}
 
 		case Drained:
-			tasks = append(tasks, terminate(instance.ID))
+			toTerm = append(toTerm, instance.ID)
 
 		case Terminating:
-			tasks = append(tasks, wait(instance.ID, Terminated))
+			toWait[Terminated] = append(toWait[Terminated], instance.ID)
 		}
 	}
 
@@ -86,7 +89,7 @@ func Tasks(cluster Cluster, config TaskConfig) ([]Task, error) {
 		if instance.Config != cluster.Config {
 			outdated++
 			if instance.State == Started && started > config.MinSize {
-				tasks = append(tasks, drain(instance.ID))
+				toDrain = append(toDrain, instance.ID)
 				started--
 			}
 		}
@@ -97,7 +100,7 @@ func Tasks(cluster Cluster, config TaskConfig) ([]Task, error) {
 			count := config.MaxSize - len(cluster.Instances)
 			tasks = append(tasks, start(cluster.ID, count))
 		}
-	} else if len(tasks) == 0 {
+	} else if len(toDrain) == 0 && len(toTerm) == 0 && len(toWait) == 0 {
 		switch {
 		case len(cluster.Instances) < config.TargetSize:
 			count := config.TargetSize - len(cluster.Instances)
@@ -110,10 +113,22 @@ func Tasks(cluster Cluster, config TaskConfig) ([]Task, error) {
 				if count == 0 {
 					break
 				}
-				tasks = append(tasks, drain(instance.ID))
+				toDrain = append(toDrain, instance.ID)
 				count--
 			}
 		}
+	}
+
+	if len(toDrain) != 0 {
+		tasks = append(tasks, drain(toDrain))
+	}
+
+	if len(toTerm) != 0 {
+		tasks = append(tasks, terminate(toTerm))
+	}
+
+	for state, instances := range toWait {
+		tasks = append(tasks, wait(state, instances))
 	}
 
 	return tasks, nil
@@ -123,16 +138,16 @@ func start(cluster ClusterID, count int) Task {
 	return taskFunc(func(ctx context.Context, env Environment) error { return env.StartInstances(ctx, cluster, count) })
 }
 
-func drain(instance InstanceID) Task {
-	return taskFunc(func(ctx context.Context, env Environment) error { return env.DrainInstance(ctx, instance) })
+func drain(instances []InstanceID) Task {
+	return taskFunc(func(ctx context.Context, env Environment) error { return env.DrainInstances(ctx, instances...) })
 }
 
-func terminate(instance InstanceID) Task {
-	return taskFunc(func(ctx context.Context, env Environment) error { return env.TerminateInstance(ctx, instance) })
+func terminate(instances []InstanceID) Task {
+	return taskFunc(func(ctx context.Context, env Environment) error { return env.TerminateInstances(ctx, instances...) })
 }
 
-func wait(instance InstanceID, state InstanceState) Task {
-	return taskFunc(func(ctx context.Context, env Environment) error { return env.WaitInstanceState(ctx, instance, state) })
+func wait(state InstanceState, instances []InstanceID) Task {
+	return taskFunc(func(ctx context.Context, env Environment) error { return env.WaitInstances(ctx, state, instances...) })
 }
 
 type taskFunc func(ctx context.Context, env Environment) error

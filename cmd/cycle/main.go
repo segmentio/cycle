@@ -82,9 +82,7 @@ func run(ctx context.Context, config config) error {
 
 	targetSize := config.TargetSize
 	for {
-		if cluster, err := environment.DescribeCluster(ctx, clusterID); err != nil {
-			events.Log("error describing %{cluster_id}s - %{error}v", clusterID, err)
-		} else {
+		if cluster, err := environment.DescribeCluster(ctx, clusterID); err == nil {
 			if targetSize == 0 {
 				targetSize = len(cluster.Instances)
 			}
