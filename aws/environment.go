@@ -198,21 +198,6 @@ func (env *Environment) DescribeCluster(ctx context.Context, id cycle.ClusterID)
 		instanceMap[id] = instance
 	}
 
-	// All instances that aren't registered to ECS are assumed to be drained
-	// already.
-	for id, instance := range instanceMap {
-		for _, containerInstance := range containerInstances {
-			if aws.StringValue(containerInstance.Ec2InstanceId) == string(id) {
-				id = ""
-				break
-			}
-		}
-		if len(id) != 0 {
-			instance.State = cycle.Drained
-			instanceMap[id] = instance
-		}
-	}
-
 	if len(ec2InstancesNeedTag) != 0 {
 		env.createCycleInstanceUpdatedAtTag(ctx, time.Now(), ec2InstancesNeedTag...)
 	}
