@@ -2,6 +2,7 @@ package aws
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -168,7 +169,7 @@ func (env *Environment) DescribeCluster(ctx context.Context, id cycle.ClusterID)
 
 	containerInstances, err := env.describeContainerInstances(ctx, clusterName)
 	if err != nil {
-		return cycle.Cluster{}, errors.WithMessage(err, "describing container instances")
+		return cycle.Cluster{}, errors.WithMessage(err, fmt.Sprintf("describing container instances of %s", clusterName))
 	}
 	for _, containerInstance := range containerInstances {
 		id := aws.StringValue(containerInstance.Ec2InstanceId)
@@ -239,10 +240,12 @@ func (env *Environment) DrainInstances(ctx context.Context, instances ...cycle.I
 		cachedInstance, ok := env.cache[instance]
 		env.mutex.RUnlock()
 		if ok {
-			ecsInstances[cachedInstance.ecsCluster] = append(
-				ecsInstances[cachedInstance.ecsCluster],
-				aws.String(cachedInstance.ecsInstanceArn),
-			)
+			if len(cachedInstance.ecsInstanceArn) != 0 {
+				ecsInstances[cachedInstance.ecsCluster] = append(
+					ecsInstances[cachedInstance.ecsCluster],
+					aws.String(cachedInstance.ecsInstanceArn),
+				)
+			}
 			ec2Instances = append(ec2Instances, aws.String(cachedInstance.ec2InstanceId))
 		}
 	}
@@ -386,30 +389,42 @@ func (env *Environment) describeInstances(ctx context.Context, instanceIds []*st
 	if len(instanceIds) == 0 {
 		return nil, nil
 	}
+
+	const maxInstanceIds = 100
 	var instances = make([]*ec2.Instance, 0, len(instanceIds))
 	var nextToken *string
-	for {
-		out, err := env.ec2.DescribeInstancesWithContext(ctx, &ec2.DescribeInstancesInput{
-			InstanceIds: instanceIds,
-			NextToken:   nextToken,
-		})
-		if err != nil {
-			return nil, errors.WithStack(err)
-		}
 
-		for _, ec2Reservation := range out.Reservations {
-			for _, ec2Instance := range ec2Reservation.Instances {
-				instances = append(instances, ec2Instance)
+	for i := 0; i < len(instanceIds); i += maxInstanceIds {
+		n := len(instanceIds) - i
+		if n > maxInstanceIds {
+			n = maxInstanceIds
+		}
+		ids := instanceIds[i : i+n]
+
+		for {
+			out, err := env.ec2.DescribeInstancesWithContext(ctx, &ec2.DescribeInstancesInput{
+				InstanceIds: ids,
+				NextToken:   nextToken,
+			})
+			if err != nil {
+				return nil, errors.WithStack(err)
+			}
+
+			for _, ec2Reservation := range out.Reservations {
+				for _, ec2Instance := range ec2Reservation.Instances {
+					instances = append(instances, ec2Instance)
+				}
+			}
+
+			nextToken = out.NextToken
+
+			if nextToken == nil {
+				break
 			}
 		}
-
-		instanceIds = nil
-		nextToken = out.NextToken
-
-		if nextToken == nil {
-			return instances, nil
-		}
 	}
+
+	return instances, nil
 }
 
 func (env *Environment) describeContainerInstances(ctx context.Context, cluster string) ([]*ecs.ContainerInstance, error) {
@@ -417,13 +432,26 @@ func (env *Environment) describeContainerInstances(ctx context.Context, cluster 
 	if err != nil {
 		return nil, err
 	}
-	out, err := env.ecs.DescribeContainerInstancesWithContext(ctx, &ecs.DescribeContainerInstancesInput{
-		Cluster:            aws.String(cluster),
-		ContainerInstances: containerInstanceArns,
-	})
-	if err != nil {
-		return nil, errors.WithStack(err)
+
+	const maxInstanceIds = 100
+	var out *ecs.DescribeContainerInstancesOutput
+
+	for i := 0; i < len(containerInstanceArns); i += maxInstanceIds {
+		n := len(containerInstanceArns) - i
+		if n > maxInstanceIds {
+			n = maxInstanceIds
+		}
+		arns := containerInstanceArns[i : i+n]
+
+		out, err = env.ecs.DescribeContainerInstancesWithContext(ctx, &ecs.DescribeContainerInstancesInput{
+			Cluster:            aws.String(cluster),
+			ContainerInstances: arns,
+		})
+		if err != nil {
+			return nil, errors.WithStack(err)
+		}
 	}
+
 	return out.ContainerInstances, nil
 }
 
@@ -441,7 +469,6 @@ func (env *Environment) listContainerInstances(ctx context.Context, cluster stri
 		}
 
 		containerInstanceArns = append(containerInstanceArns, out.ContainerInstanceArns...)
-		clusterName = nil
 		nextToken = out.NextToken
 
 		if nextToken == nil {
