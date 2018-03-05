@@ -161,7 +161,7 @@ func (env *Environment) DescribeCluster(ctx context.Context, id cycle.ClusterID)
 	for _, tag := range group.Tags {
 		key := aws.StringValue(tag.Key)
 		val := aws.StringValue(tag.Value)
-		if key == "Cluster" {
+		if key == "Cluster" || key == "Name" {
 			clusterName = val
 			break
 		}
@@ -204,6 +204,11 @@ func (env *Environment) DescribeCluster(ctx context.Context, id cycle.ClusterID)
 	}
 
 	for _, instance := range instanceMap {
+		if instance.Config != cluster.Config && instance.State == cycle.Started {
+			if len(instanceCache[instance.ID].ecsInstanceArn) == 0 {
+				instance.State = cycle.Drained
+			}
+		}
 		cluster.Instances = append(cluster.Instances, instance)
 	}
 
@@ -323,14 +328,16 @@ func (env *Environment) TerminateInstances(ctx context.Context, instances ...cyc
 					return
 				}
 			}
-			_, err = env.asg.CompleteLifecycleActionWithContext(ctx, &autoscaling.CompleteLifecycleActionInput{
-				AutoScalingGroupName:  aws.String(cachedInstance.ec2GroupName),
-				InstanceId:            aws.String(cachedInstance.ec2InstanceId),
-				LifecycleHookName:     aws.String(cachedInstance.ec2TermHook),
-				LifecycleActionResult: aws.String("CONTINUE"),
-			})
-			if err != nil {
-				errch <- errors.WithStack(err)
+			if len(cachedInstance.ec2TermHook) != 0 {
+				_, err = env.asg.CompleteLifecycleActionWithContext(ctx, &autoscaling.CompleteLifecycleActionInput{
+					AutoScalingGroupName:  aws.String(cachedInstance.ec2GroupName),
+					InstanceId:            aws.String(cachedInstance.ec2InstanceId),
+					LifecycleHookName:     aws.String(cachedInstance.ec2TermHook),
+					LifecycleActionResult: aws.String("CONTINUE"),
+				})
+				if err != nil {
+					errch <- errors.WithStack(err)
+				}
 			}
 		}(instance)
 	}
@@ -434,7 +441,7 @@ func (env *Environment) describeContainerInstances(ctx context.Context, cluster 
 	}
 
 	const maxInstanceIds = 100
-	var out *ecs.DescribeContainerInstancesOutput
+	containerInstances := make([]*ecs.ContainerInstance, 0, len(containerInstanceArns))
 
 	for i := 0; i < len(containerInstanceArns); i += maxInstanceIds {
 		n := len(containerInstanceArns) - i
@@ -443,16 +450,17 @@ func (env *Environment) describeContainerInstances(ctx context.Context, cluster 
 		}
 		arns := containerInstanceArns[i : i+n]
 
-		out, err = env.ecs.DescribeContainerInstancesWithContext(ctx, &ecs.DescribeContainerInstancesInput{
+		out, err := env.ecs.DescribeContainerInstancesWithContext(ctx, &ecs.DescribeContainerInstancesInput{
 			Cluster:            aws.String(cluster),
 			ContainerInstances: arns,
 		})
 		if err != nil {
 			return nil, errors.WithStack(err)
 		}
+		containerInstances = append(containerInstances, out.ContainerInstances...)
 	}
 
-	return out.ContainerInstances, nil
+	return containerInstances, nil
 }
 
 func (env *Environment) listContainerInstances(ctx context.Context, cluster string) ([]*string, error) {
